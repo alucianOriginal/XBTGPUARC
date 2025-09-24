@@ -20,6 +20,13 @@ Current State:
 * The kernel studies and experiments I’ve done offline are far more complex, but also too messy to publish at the moment.
 * Think of this as a “Quasimodo build” – it walks, but not gracefully.
 
+How to Start this early Quasimodo build?:
+* I do not know it realy, but you need to put a folder with the name "kernels" and make there the zhash.cl file in.
+* Then, you need to compile it with the makefile on your system. I build that all under Linux Garuda an have no idea about how and if it is running on your OS.
+* For fun, change the BTG Wallet Adress to yours, you can find in the files. Just, for better feeling and so on. Later, you also need to do this here but with more compfort to expect.
+* Then, start the "run.sh" from your Console out the XBTGPUAR Folder and the programm should make a connection to solo-btg.2miners.com Pool.
+* I recommed not to waste your time to much with it in this State!!! Ask me on all the ways i shown up for helping you out if i can do it.
+
 What’s Next?:
 
 I’ll continue to:
