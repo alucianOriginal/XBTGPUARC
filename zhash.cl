@@ -1,3 +1,5 @@
+//--The Kernel needs a folder who he is in with the Name: "kernels"--
+
 #define INPUT_SIZE     512
 #define HASH_SIZE      32
 #define WORK_ITEMS     131072
