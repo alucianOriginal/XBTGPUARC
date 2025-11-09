@@ -1,6 +1,21 @@
 Welcome in the XBTGPUARC Timechain Mining Programm. 
 
 Warning: This is an early-stage learning project.
+This is my absolute first Programm ever since 
+23 years in using Computers a little bit more than a normal did.
+
+This would take a long time to master for me. 
+My Updaterate is very Slow and all this here 
+is thought for need years in the hardest case.
+
+The next Updates are just from the Perspektive to can do more than try to get some Code from AI.
+I hope you are interessted in the steps a human with some handicaps can do today becouse of the digital and analog help ecosystems. My person is also very lucky in doing that very free from all the people around me since a long time now.
+
+I would do something in the end who can a little bit helpfull or is funny to have and to do.
+
+My absolute Dream these days is a Social Working IT Company buildet with just People who work toghether, not against for the peoples digital needs and woulds.
+
+Also here my work everytime, like everything in the future, is free for all. The Ghost of Open Source also hits me and the persons around me with.
 
 I’m an absolute beginner in programming – this miner is not safe, stable, or ready to use yet. Please don’t expect a working product here (at least not for now).
 
