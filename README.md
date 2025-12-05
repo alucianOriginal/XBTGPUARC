@@ -1,5 +1,5 @@
 Welcome in the XBTGPUARC Timechain Mining Programm. 
-
+Nothin happens here? :-) 
 Warning: This is an early-stage learning project.
 This is my absolute first Programm ever since 
 23 years in using Computers a little bit more than a normal did.
