@@ -1,3 +1,7 @@
+
+28.02.26 
+
+This here will be hard reworked in the next few month until july for worked progress again.
 Welcome in the XBTGPUARC Timechain Mining Programm. 
 Nothin happens here? :-) 
 Warning: This is an early-stage learning project.
