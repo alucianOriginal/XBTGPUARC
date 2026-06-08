@@ -1,0 +1,1506 @@
+#!/bin/bash
+if [ -n "$FISH_VERSION" ]; then
+echo "❌FEHLER BITTE STARTE MIT 'bash XAIGPUARC.sh' ODER INSTALLIERE DIR 'bass'"
+exit 1
+fi
+
+#|✅XAIGPUARC✅
+#|SPRACHMODELLSPRACHSTEUERUNGSDIKTIERAUTOMAT
+#|AUDIOSTEUERUNGSAUTOMATZUTEXTSPRACHMODULKIPROGRAMM
+
+#|DATUM
+#|06.06.2026
+
+#|UHRZEIT
+#|19:53
+
+#|ATTENTION---System--Synthetik--Entwickler---ATTENTION
+
+
+set -euo pipefail
+IFS=$'\n\t'
+PRECISION="FP16"
+DEVICE="ARC"
+IGPU_VRAM_FALLBACK_GIB="${IGPU_VRAM_FALLBACK_GIB:-25}"
+IGPU_VRAM_RESERVE_GIB="${IGPU_VRAM_RESERVE_GIB:-1}"
+LLAMA_CPP_DIR="llama.cpp"
+#DANGER
+WHISPER_CPP_DIR="whisper.cpp"
+#wi1
+
+
+BUILD_DIR="${BUILD_DIR:-XAIGPUARC}"
+BUILD_DIR="${BUILD_DIR%/}"
+
+#|KONFIGURIERE UMGEBUNGSVARIABLEN VORBAU XAIGPUARC
+GGML_SYCL_CPP="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp"
+LOG_FILE="${BUILD_DIR}/XAIGPUARC.log"
+CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
+
+NPROC="${NPROC:-$(nproc)}"
+LLAMA_CLI_PATH="bin/llama-cli"
+
+#DANGER
+
+WHISPER_CLI_PATH="bin/whisper-cli"
+#wi2
+#|AUDIOZUTEXTSPRACHMODUL FUER XAIGPUARC VORBAU
+
+AUDIO_TMP="/tmp/xaigpuarc_voice.wav"           #GESPEICHERTES DIKTAT AUDIOFORMAT
+TXT_TMP="/tmp/xaigpuarc_voice_output.txt"      #GESPEICHERTES DIKTAT TEXTFORMAT
+WHISPER_MODEL_PATH="/models/ggml-model.bin"   #SPRACH ZU TEXTMODELLPFAD
+BUILD_DIR="whisper.cpp"               #WISPER ORDNERPFAD
+
+#|CODEWOERTER FUER SPRACHSTEUERUNG VON XAIGPUARC
+CODEWORD_ENTER="ENTER"
+CODEWORD_KORREKTUR="KORREKTUR"
+CODEWORD_ENDE="ENDE"
+CODEWORD_START="START"
+CODEWORD_PAUSE="PAUSE"
+
+#|ZUSTANDSVARIABLEN FUER SPRACHSTEUERUNG XAIGPUARC
+LISTENING=1          # 1 = ZUHOEREN AKTIV, 0 = ZUHOEREN GESTOPPT
+PAUSED=0             # 0 = PAUSIERT, 1 = AUFNAHME
+ACCUMULATED_PROMPT=""  # SAMMELT PER SPRACHE DIKTIERTE TEXTEINGABEN
+FINAL_VOICE_PROMPT="" #FERTIGER VOICE PROMPT
+AUDIO_DEVICE="CPU" #NPU GNA
+#DANGER wi2 ENDE
+
+
+LS_SYCL_DEVICE_PATH="bin/llama-ls-sycl-device"
+ADD_SUBDIR_LINE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp"
+
+#|ONEAPIFUNKTIONEN
+export LIBVA_DRIVER_NAME="iHD,i915,xe"
+export TCM_ROOT="${TCM_ROOT:-"/opt/intel/oneapi/tcm/latest/"}"
+#export GGML_CCACHE=OFF
+export SYCL_CACHE_PERSISTENT=0
+export OCL_ICD_FILENAMES=""
+export ZES_ENABLE_SYSMAN=0
+export OverrideDefaultFP64Settings=0
+export CCACHE_DIR="$HOME/.ccache"
+export COMPILER_VERSION="2026.0"
+
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+export SYCL_PI_LEVEL_ZERO_BATCH_SIZE=1024
+export FP_FLAG=FP16
+
+export SYCL_DEVICE_FILTER=level_zero:gpu
+export GGML_SYCL_SPLIT_MODE=row
+export ZE_ENABLE_PCI_ID_DEVICE_ORDER=1
+
+export ONEAPI_DEVICE_SELECTOR="level_zero:0,1"
+
+#|TREIBERKOMPATIBILITAET INTEL COMPUTE RUNTIME 26 PLUS
+CR_VERSION=$(pacman -Q intel-compute-runtime 2>/dev/null | awk '{print $2}' | cut -d. -f1)
+if [ "${CR_VERSION:-0}" -ge 26 ]; then
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=0
+export GGML_SYCL_DISABLE_OPT=1
+echo "🔷INTEL COMPUTE RUNTIME 26 PLUS ERKANNT KOMPATIBILITAETSMODUS AKTIV"
+fi
+#|HILFSFUNKTIONEN
+log() { printf "🔷 %s\n" "$*"; }
+success() { printf "✅ %s\n" "$*"; }
+error() { printf "❌ %s\n\n" "$*"; }
+warn() { printf "⚠️ %s\n" "$*"; }
+#|INTERNETPRUEFUNG
+check_internet() {
+log "🔷PRUEFE INTERNETZ VERBINDUNG"
+if timeout 5 bash -c "</dev/tcp/8.8.8.8/53" 2>/dev/null; then
+success "✅INTERNETZ VERBINDUNG VORHANDEN"
+return 0
+else
+warn "⚠️KEINE INTERNETZ VERBINDUNG ERSTINSTALLATION ONLINE ABHAENGIGKEITEN BITTE IHREN ANSCHLUSS PRUEFEN"
+return 1
+fi
+}
+#|UMGEBUNG RUECKFALL MECHANISMEN VORBEREITEN
+prepare_environment() {
+log "🔷HOLE ONEAPI KOPFZEILEN XAIGPUARC"
+local SETVARS_PATH="/opt/intel/oneapi/setvars.sh"
+if [ ! -f "$SETVARS_PATH" ]; then
+error "❌ONE API KOEPFZEILEN NICHT GEFUNDEN $SETVARS_PATH INSTALLIERE ONEAPI BIBLIOTHEKEN"
+exit 1
+fi
+log "🔷SETVARS SETZEN PLUS SUCHEN SS PLUS S"
+source "$SETVARS_PATH" --force 2>/dev/null
+local ONEAPI_ROOT_FALLBACK="/opt/intel/oneapi"
+local COMPILER_VERSION_FALLBACK="${COMPILER_VERSION:-2026.0}"
+DPCPP_ROOT="${DPCPP_ROOT:-${ONEAPI_ROOT_FALLBACK}/compiler/${COMPILER_VERSION_FALLBACK}}"
+MKL_ROOT="${MKL_ROOT:-${ONEAPI_ROOT_FALLBACK}/mkl/${COMPILER_VERSION_FALLBACK}}"
+ONEAPI_ROOT="${ONEAPI_ROOT:-${ONEAPI_ROOT_FALLBACK}}"
+export CC=icx
+export CXX=icpx
+export FC=ifx
+export DPCPP_ROOT
+export MKL_ROOT
+export ONEAPI_ROOT
+export CPATH="${CPATH:-}:${MKL_ROOT}/include"
+local LIB_DIR="/opt/intel/oneapi/mkl/latest/lib/intel64/libmkl_sycl.so"
+export LD_LIBRARY_PATH="./${BUILD_DIR}/bin:${LIB_DIR}:${LD_LIBRARY_PATH:-}"
+if ! command -v icx &>/dev/null || ! command -v icpx &>/dev/null; then
+error "❌ICX IPCX ONE API XAIGPUARC UNTERMODUL INSTALLATION FEHLGESCHLAGEN"
+exit 1
+fi
+log "🔷VERBINDUNG ONEAPI GELADEN DPCPP${DPCPP_ROOT}MKL${MKL_ROOT}"
+}
+#|1|PROJEKT VORBAU
+setup_project() {
+if [[ "${1:-}" == "--clean" ]]; then
+warn "⚠️ REINIGUNGSMODUS LOESCHE ALTE BAUSTEINE"
+rm -rf "${LLAMA_CPP_DIR}"
+rm -rf "${WHISPER_CPP_DIR}"
+#wi3
+rm -rf "${BUILD_DIR}"
+success "✅ REINIGUNG ABGESCHLOSSEN"
+fi
+log "🔷BEREITE XAIGPUARC VORBAU BITTE WARTEN"
+if [ ! -d "${LLAMA_CPP_DIR}" ]; then
+log "🔷ZIEHE BAUSTEINE AUS INTERNETZ"
+git clone https://github.com/ggerganov/llama.cpp "${LLAMA_CPP_DIR}"
+if [ ! -d "${LLAMA_CPP_DIR}" ]; then
+error "❌ZIEHEN DER BAUSTEINE FEHLGESCHLAGEN ABBRUCH"
+
+fi
+if [ ! -d "${WHISPER_CPP_DIR}" ]; then
+log "🔷ZIEHE BAUSTEINE WHISPER AUS INTERNETZ"
+git clone https://github.com/ggerganov/whisper.cpp "${WHISPER_CPP_DIR}"
+fi
+exit 1
+fi
+if pushd "${LLAMA_CPP_DIR}" > /dev/null; then
+log "🔷AKTUALISIERE ALLE BAUSTEINE FUER UNTERMODULE"
+git reset --hard HEAD
+git pull
+git submodule update --init --recursive
+popd > /dev/null
+success "✅LADE LLAMA BAUSTEINE IN XAIGPUARC UNTERBAUMODULE"
+if pushd "${WHISPER_CPP_DIR}" > /dev/null; then
+log "🔷AKTUALISIERE WHISPER BAUSTEINE"
+git reset --hard HEAD ; git pull ;
+
+success "✅LADE WISPER BAUSTEINE IN XAIGPUARC UNTERBAUMODULE"
+fi
+else
+error "❌FEHLER HAUPTVERZEICHNIS'${LLAMA_CPP_DIR}'NICHT GEFUNDEN"
+#wi4
+exit 1
+fi
+}
+#|AUFWERTLOGIK 0 BIS 12 +a+b+c
+patch_llama_cpp() {
+log "🔷PATCH 1|12 GGML SYCL DOCTPHELPER REGESTRIERUNG BIBLIOTHEK KOPFZEILENEINTRAEGE"
+local DPCT_HELPER_FILE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/dpct/helper.hpp"
+local CMAKE_LISTS_FILE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/CMakeLists.txt"
+local CUSTOM_KERNEL_DIR="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/custom_kernels"
+local CUSTOM_KERNEL_SRC="${CUSTOM_KERNEL_DIR}/ggml_flash_attention_sycl.cpp"
+local CUSTOM_KERNEL_CMAKE="${CUSTOM_KERNEL_DIR}/CMakeLists.txt"
+local GGML_SYCL_CPP="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp"
+local KERNEL_SOURCE_LOCAL="ggml_flash_attention_sycl.cpp"
+#|1|12
+if [ -f "$DPCT_HELPER_FILE" ]; then
+log "🔷PATCH 1|12 DOCTPHELPER BIBLIOTHEK REGESTRIERTE KOPFZEILENEINTRAEGE LADEN"
+if sed -i 's|#include <sycl/ext/oneapi/math.hpp>|#include <sycl/ext/intel/math.hpp>|g' "$DPCT_HELPER_FILE"; then
+log "🔷PATCH 1|12 SCHREIBE DOCTPHELPER BIBLIOTHEK KOPFZEILENEINTRAEGE IN XAIGPUARC"
+elif sed -i '#if !defined(DPCT_USM_LEVEL_NONE) && defined(DPCT_ENABLE_MKL_MATH).#endif|#include <sycl|ext|intel|math.hpp>|g' "$DPCT_HELPER_FILE"; then
+log "✅PATCH 1|12 DOCTPHELPER BIBLIOTHEK KOPFZEILENEINTRAEGE ERFOLGREICH REGESTRIERT - SPEICHERE"
+#|1|a|12
+else
+error "❌PATCH 1|a|12 DOCTPHELPER BIBLIOTHEK KOPFZEILENEINTRAEGE EINLADEN DER REGESTRIERUNG FEHLGESCHLAGEN"
+return 1
+fi
+else
+warn "⚠️PATCH 1|a|12 DOCTPHELPER BIBLIOTHEK NICHT GEFUNDEN ABHAENIGKEITEN PRUEFEN"
+return 1
+fi
+#|2|12
+log "🔷PATCH 2|12 BAUE FLASH ATTENTION KERN"
+if [ ! -d "$CUSTOM_KERNEL_DIR" ]; then
+mkdir -p "$CUSTOM_KERNEL_DIR"
+log "✅PATCH 2|12 ORNDER FUER FLASH ATTENTION KERN'${CUSTOM_KERNEL_DIR}'ANGELEGT"
+fi
+if [ -f "$KERNEL_SOURCE_LOCAL" ]; then
+cp "$KERNEL_SOURCE_LOCAL" "$CUSTOM_KERNEL_SRC"
+log "✅PATCH 2|12 ggml_flash_attention_sycl.cpp KERN'${KERNEL_SOURCE_LOCAL}' '${CUSTOM_KERNEL_SRC}'EINGEBAUT"
+fi
+
+#|2|a|12
+if [ ! -f "$CUSTOM_KERNEL_SRC" ]; then
+echo "ggml_flash_attention_sycl.cpp KERN VERZEICHNIS" > "$CUSTOM_KERNEL_SRC"
+warn "⚠️PATCH 2|a|12 LADEN DER KERNELDATEI'${KERNEL_SOURCE_LOCAL} FEHLGESCHLAGEN"
+fi
+echo "
+add_library(ggml_flash_attention_sycl OBJECT
+    ggml_flash_attention_sycl.cpp)
+target_include_directories(ggml_flash_attention_sycl PRIVATE \${GGML_SYCL_INCLUDE_DIRS})
+target_compile_options(ggml_flash_attention_sycl PUBLIC \${GGML_SYCL_COMPILE_FLAGS})
+" > "$CUSTOM_KERNEL_CMAKE"
+log "🔷PATCH 2|a|12 CMAKE TXT LISTEN OBJEKTE KOPFZEILENEINTRAEGE EINFUEGEN"
+
+#|2|b|12
+local ADD_SUBDIR_LINE="add_subdirectory(ggml_flash_attention_sycl)"
+if ! grep -Fq "${ADD_SUBDIR_LINE}" "$CMAKE_LISTS_FILE"; then
+if sed -i "\|#add_subdirectory(dpct)|a\\${ADD_SUBDIR_LINE}" "$CMAKE_LISTS_FILE"; then
+
+log "✅PATCH 2|b|12 ERFOLGREICH FLASH ATTENTION KOPFZEILENEINTRAEGE CMAKE TXT GESCHRIEBEN"
+else
+error "❌PATCH 2|b|12 FLASH ATTENTION KOPFZEILENEINTRAEGE EINGLIEDERUNG CMAKE TXT FEHLGESCHLAGEN"
+return 1
+fi
+else
+log "🔷PATCH 2|b|12 FLASH ATTENTION KOPFZEILENEINTRAEGE BEREITS AKTIV UEBERSPRINGE"
+fi
+#|3|12
+if [ -f "$CMAKE_LISTS_FILE" ]; then
+log "🔷PATCH 3|12 CMAKE TEXT LISTEN MKL KOPZEILEN ICP|X IMPLEMENTIERUNG VORBEREITEN"
+local MKL_INCLUDE_PATH="${MKL_ROOT}/include"
+local COMPILER_INCLUDE_PATH="${DPCPP_ROOT}/include"
+local DPCPP_LIB_INCLUDE_PATH="${DPCPP_ROOT}/lib/dpcpp/include"
+local ALL_INCLUDE_FLAGS="-I${MKL_INCLUDE_PATH} -I${COMPILER_INCLUDE_PATH} -I${DPCPP_LIB_INCLUDE_PATH}"
+local PATCH_LINE="target_compile_options (ggml-sycl PUBLIC ${ALL_INCLUDE_FLAGS})"
+local SEARCH_MARKER="#Add include directories for MKL headers"
+if ! grep -Fq "${COMPILER_INCLUDE_PATH}" "$CMAKE_LISTS_FILE"; then
+local SED_PATCH_LINE=$(echo "$PATCH_LINE" | sed 's| |\ |g; s|[|&]|\&|g')
+if sed -i "\|${SEARCH_MARKER}|a $SED_PATCH_LINE" "$CMAKE_LISTS_FILE"; then
+log "✅PATCH 3|12 ICP|X CMAKET LISTS TXT MKL KOPFZEILENEINTRAEGE EINGEFUEGT"
+else
+error "❌PATCH 3|12 ICP|X CMAKE LISTS TXT MKL NICHT GEFUNDEN ABHAENGIKEITEN PRUEFEN"
+return 1
+fi
+else
+log "✅PATCH 3|12 CMAKE LISTS TXT PFAD SYCL GGML BEREITS BENUTZT UEBERSPRINGE"
+fi
+else
+error "❌PATCH 3|12 FEHLGESCHLAGEN CMAKE LISTS TXT SYCL GGML PFADE ABHAENGIGKEITEN GARUDA LINUX ARCH"
+return 1
+fi
+
+#|4|12
+log "🔷PATCH 4|12 FLASH ATTENTION HAUPTKERN KOPFZEILENEINTRAEGE INJIZIEREN"
+if [ -f "$GGML_SYCL_CPP" ]; then
+local FA_REGISTER_CODE=$'//REGESTRIERE ggml_flash_attention_sycl.cpp \nextern "C"
+void ggml_flash_attention_sycl(ggml_flash_attention_sycl * ctx, ggml_tensor *
+dst, const ggml_tensor * Q, const ggml_tensor * K, const ggml_tensor * V);\n'
+if ! grep -Fq "ggml_flash_attention_sycl" "${GGML_SYCL_CPP}"; then
+
+#|Anmerkung FlashAttention alucian einfuegen in HOME Ordner
+echo "${FA_REGISTER_CODE}" > /tmp/ggml_flash_attention_sycl.cpp
+awk '/extern "C" void ggml_flash_attention_sycl/ { system("cat /tmp/ggml_flash_attention_sycl.patch"); } { print }' "${GGML_SYCL_CPP}" > /tmp/ggml-sycl.cpp.new
+mv /tmp/ggml-sycl.cpp.new "${GGML_SYCL_CPP}"
+cp "$GGML_SYCL_CPP" "$GGML_SYCL_CPP.bak"
+if [ $? -eq 0 ]; then
+log "✅PATCH 4|12 AWK KOPFZEILENEINTRAEGE DEKLARATION EINGEFUEGT"
+else
+error "❌PATCH 4|12 FEHLER EINFUEGEN FLASH ATTENTION KOPFZEILENEINTRAEGE DEKLARATION AWK FEHLT"
+return 1
+fi
+else
+log "🔷PATCH 4|12 FLASH ATTENTION KOPFZEILENEINTRAEGE DEKLARATIONEN VORHANDEN FORTFAHREN"
+fi
+#|4|a|12
+local FA_DISPATCH_CASE=$' case GGML_OP_FLASH_ATTN:\n ggml_flash_attention_sycl(ctx, dst, src0, src1, src2);\n break;'
+if ! grep -Fq "case GGML_OP_FLASH_ATTN:" "${GGML_SYCL_CPP}"; then
+log "🔷PATCH 4|a|12 FUEGE ZWISCHENSPEICHER PER AWK KOPFZEILE EIN"
+echo "${FA_DISPATCH_CASE}" > /tmp/fa_dispatch.patch
+awk '/case GGML_OP_MUL_MAT_Q_K:/ { system("cat /tmp/fa_dispatch.patch"); } { print }' "${GGML_SYCL_CPP}" > /tmp/ggml-sycl.cpp.new
+mv /tmp/ggml-sycl.cpp.new "${GGML_SYCL_CPP}"
+if [ $? -eq 0 ]; then
+
+log "✅PATCH 4|a|12 AWK UNTERBAU KOPFZEILENEINTRAEGE EINGEFUEHRT"
+else
+error "❌PATCH 4|a|12 FEHLER EINFUEGEN AWK KOPFZEILENEINTRAEGE"
+fi
+else
+log "✅PATCH 4|a|12 AWK UNTERBAU FLASH ATTENTION KOPFZEILENEINTRAEGE INJEKTION VORHANDEN FORTFAHREN"
+fi
+log "🔷PATCH 4|a|12 ERFOLGREICH FLASH ATTENTION AKW UNTERBAU GELADEN"
+else
+error "❌PATCH 4|a|12 FEHLGESCHLAGEN FLASH ATTENTION AWK PATCH KERN STOPP"
+return 1
+fi
+
+#|5|12
+log "🔷PATCH 5|12FLASH ATTENTION OBJEKT INJIZIERE VARIABLEN UNTERBLOCK SYCL BIBLIOTHEKEN"
+local CMAKE_LISTS_FILE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/CMakeLists.txt"
+local VAR_LINE="set(FA_OBJECT_FILES \"\$<TARGET_OBJECTS:ggml_flash_attention_sycl>\")"
+local VAR_SEARCH_MARKER="set(GGML_SYCL_SOURCES"
+if ! grep -Fq "FA_OBJECT_FILES" "$CMAKE_LISTS_FILE"; then
+local SED_VAR_LINE=$(echo "$VAR_LINE" | sed 's/[\/&]/\\&/g')
+if sed -i "\|${VAR_SEARCH_MARKER}|a ${SED_VAR_LINE}" "$CMAKE_LISTS_FILE"; then
+log "✅PATCH 5|12 FLASH ATTENTION OBJEKT VARIABLE ERFOLGREICH DEFINIERT WEITER"
+else
+error "❌PATCH 5|12 FLASH ATTENTION OBJEKT REGESTRIERUNG FEHLGESCHLAGEN STOPP"
+return 1
+fi
+else
+log "🔷PATCH 5|12 FLASH ATTENTION OBJEKT VARIABLEN VORHANDEN UEBERSPRINGE"
+fi
+
+#|5|a|12
+local TARGET_SEARCH_MARKER="target_sources(ggml-sycl PRIVATE \${GGML_SYCL_SOURCES})"
+local NEW_TARGET_SOURCES_LINE="target_sources(ggml-sycl PRIVATE \${GGML_SYCL_SOURCES} \${FA_OBJECT_FILES})"
+if grep -Fq "${TARGET_SEARCH_MARKER}" "$CMAKE_LISTS_FILE" && ! grep -Fq "\${FA_OBJECT_FILES}" "$CMAKE_LISTS_FILE"; then
+local SED_NEW_LINE=$(echo "$NEW_TARGET_SOURCES_LINE" | sed 's/[\/&]/\\&/g')
+local SED_SEARCH_MARKER=$(echo "$TARGET_SEARCH_MARKER" | sed 's/[\/&]/\\&/g')
+if sed -i "\|${SED_SEARCH_MARKER}|${SED_NEW_LINE}|" "$CMAKE_LISTS_FILE"; then
+log "✅PATCH 5|a|12 ERFOLGREICHE GGML SYCL INJEKTIONEN"
+else
+error "❌PATCH 5|a|12 GGML SYCL INJEKTION FEHLGESCHLAGEN"
+return 1
+fi
+else
+log "✅PATCH 5|a|12 GGML SYCL AKTIV INJECTION UEBERSPRUNGEN"
+fi
+
+#|6|12
+log "🔷PATCH 6|12 SSMCONV CPP WARNUNG BEHEBEN VORZEICHEN VERGLEICH AKW PATCH"
+local SSM_CONV_FILE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ssm_conv.cpp"
+local SEARCH_LINE='GGML_ASSERT(src0->nb\[1\] == src0->ne\[0\] * static_cast<int64_t>(sizeof(float)));'
+local REPLACE_LINE='GGML_ASSERT(src0->nb\[1\] == (size_t)(src0->ne\[0\] * sizeof(float)));'
+if [ -f "$SSM_CONV_FILE" ]; then
+
+#|6|a|12
+if grep -Fq "${SEARCH_LINE}" "$SSM_CONV_FILE"; then
+log "🔷PATCH 6a|12 SUCHE ssm_conv.cpp NATIVE ADRESSIERUNG"
+if grep -Fq "${SEARCH_LINE}" "$SSM_CONV_FILE"; then
+if sed -i "|${SEARCH_LINE}|${REPLACE_LINE}|g" "$SSM_CONV_FILE"; then
+log "✅PATCH 6|a|12 SSMCONV CPP ERFOLGREICH GESCHRIEBEN"
+else
+error "❌PATCH 6|a|12 SSMCONV CPP FEHLGESCHLAGEN"
+return 1
+fi
+else
+warn "⚠️PATCH 6|a|12 SSMCONV CPP ZEILE NICHT GEFUNDEN UEBERSPRINGE"
+fi
+fi
+
+#ATTENTION 7|12
+
+#|7|12
+log "🔷PATCH 7|12 ERZWINGE MAXIMALE BLOCK GROESSE 1024 FUER ARC ALCHEMIST"
+if [ -f "$GGML_SYCL_CPP" ]; then
+if ! grep -q "GGML_SYCL_MAX_BLOCK_SIZE 1024" "$GGML_SYCL_CPP"; then
+sed -i 's/#define GGML_SYCL_MAX_BLOCK_SIZE [0-9]*/#define GGML_SYCL_MAX_BLOCK_SIZE 1024/g' "$GGML_SYCL_CPP"
+success "✅PATCH 7|12 ERZWINGE MAXIMALE BLOCK GROESSE 1024 FUER ARC ALCHEMIST AKTIVIERT"
+log "✅PATCH 7|12 MAXIMALE BLOCK GROESSE 1024 ZWANG ERFOLGREICH INJIZIERT"
+else
+log "🔷PATCH 7|12 MAXIMALE BLOCK GROESSE 1024 ZWANG FUER ARC BEREITS DEFINIERT"
+fi
+fi
+#|8|12
+log "🔷PATCH 8|12 SYCL QUEUE ORDNER: HOME/XAIGPUARC OPTIMIERVORGANG KOPFZEILENEINTRAEGE"
+local SYCL_FILE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp"
+if [ ! -f "$SYCL_FILE" ]; then
+error "❌PATCH 8|12 KONNTE DIE DATEI ${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp NICHT FINDEN"
+return 1
+fi
+if grep -q "sycl::property_list" "$SYCL_FILE"; then
+sed -i 's|sycl::property_list prop_list{[^}]*}|sycl::property_list prop_list{sycl::property::queue::in_order{}}|' "$SYCL_FILE"
+else
+sed -i '/sycl::queue q{/i\    sycl::property_list prop_list{sycl::property::queue::in_order{}};' "$SYCL_FILE"
+fi
+fi
+#|9|12
+if grep -q "sycl::queue q{" "$SYCL_FILE"; then
+sed -i 's|sycl::queue q{[^}]*}|sycl::queue q{dev, ctx, prop_list}|g' "$SYCL_FILE"
+if grep -q "in_order" "$SYCL_FILE"; then
+success "✅PATCH 9|12 SYCL QUEUE ERFOLGREICH KOPFZEILENEINTRAEGE OPTIMIERT"
+else
+error "❌PATCH 9|12 SYCL QUEUE AENDERUNGEN KOPFZEILENEINTRAEGE NICHT FERTIG"
+return 1
+fi
+else
+warn "⚠️PATCH 9|12 SYCL QUEUE KOPFZEILENEINTRAEGE NICHT GEFUNDEN UEBERSPRINGE"
+fi
+success "🔷ALLE FUENF VON ACHT EINGLIEDERUNGEN INTEL XE/ARC/iGPU/dGPU/eGPU FUER XAIGPUARC ERFOLGREICH"
+patch_gcc16_t5 || return 1
+}
+
+#|10|a|12
+#|GCC16 T5.CPP VORWAERTSDEKLARATION VOR INSTANTIIERUNG
+patch_gcc16_t5() {
+log "🔷PATCH 10|a|12 GCC16 T5.CPP VORWAERTSDEKLARATION VOR INSTANTIIERUNG"
+local T5_FILE="${LLAMA_CPP_DIR}/src/models/t5.cpp"
+if [ ! -f "$T5_FILE" ]; then
+warn "⚠️PATCH 10|a|12 T5.CPP NICHT GEFUNDEN UEBERSPRINGE"
+return 0
+fi
+if grep -q "XAIGPUARC_GCC16_PATCH" "$T5_FILE"; then
+log "🔷PATCH 10|a|12 GCC16 VORWAERTSDEKLARATION BEREITS AKTIV UEBERSPRINGE"
+return 0
+fi
+awk '/^std::unique_ptr<llm_graph_context> llama_model_t5::build_arch_graph/ { print ""; print "// XAIGPUARC_GCC16_PATCH: Vorwaertsdeklaration vor Instantiierung"; print "template <> llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_params & params);"; print "template <> llama_model_t5::graph<true>::graph(const llama_model & model, const llm_graph_params & params);"; } { print }' "$T5_FILE" > /tmp/t5_patched.cpp && mv /tmp/t5_patched.cpp "$T5_FILE"
+if grep -q "XAIGPUARC_GCC16_PATCH" "$T5_FILE"; then
+success "✅PATCH 10|a|12 GCC16 T5.CPP VORWAERTSDEKLARATION ERFOLGREICH INJIZIERT"
+else
+error "❌PATCH 10|a|12 GCC16 T5.CPP VORWAERTSDEKLARATION FEHLGESCHLAGEN"
+return 1
+fi
+
+#|WEITERLEITUNG
+patch_gcc16_t5
+patch_10_xmx_dual
+}
+
+#|10|b|12
+#|GCC 16 AUF T5 AWK VORWAERTS DECLARATION INJEKTION
+patch_gcc16_t5() {
+log "🔷PATCH 10|b|12 GCC16 T5.CPP AWK VORWAERTSDEKLARATION INJEKTION"
+local T5_FILE="${LLAMA_CPP_DIR}/src/models/t5.cpp"
+if [ ! -f "$T5_FILE" ]; then return 0; fi
+if grep -q "XAIGPUARC_GCC16_PATCH" "$T5_FILE"; then return 0; fi
+awk '/^std::unique_ptr<llm_graph_context> llama_model_t5::build_arch_graph/ { print ""; print "// XAIGPUARC_GCC16_PATCH: Vorwaertsdeklaration vor Instantiierung"; print "template <> llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_params & params);"; print "template <> llama_model_t5::graph<true>::graph(const llama_model & model, const llm_graph_params & params);"; } { print }' "$T5_FILE" > /tmp/t5_patched.cpp && mv /tmp/t5_patched.cpp "$T5_FILE"
+    success "✅ PATCH 10|b|12 GCC16 T5 TEMPLATE VORWAERTSDEKLARATION EINGEFUEGT"
+}
+
+#ATTENTION 10|c|-|12|
+#PATCH|10|c|12
+#XMX_KERNEL_SRC UND GGML_FLASH_ATTENTION_SYCL RECHENOPERATIONSPRUEFER AUF LOKALEM ENDNUTZERSYSTEM
+patch_10_xmx_dual() {
+    log "🔷PATCH|10|c|12 XMX_KERNEL UND GGML_FLASH_ATTENTION_SYCL RECHENOPERATIONSPRUEFER AUF LOKALEM ENDNUTZERSYSTEM"
+    local CUSTOM_KERNEL_DIR="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/custom_kernels"
+    local XMX_KERNEL_SRC="${CUSTOM_KERNEL_DIR}/ggml_flash_attention_xmx.cpp"
+    local GGML_SYCL_CPP="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp"
+    local CMAKE_LISTS="${CUSTOM_KERNEL_DIR}/CMakeLists.txt"
+    local MAIN_CMAKE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/CMakeLists.txt"
+
+    if [ ! -f "ggml_flash_attention_xmx.cpp" ]; then
+        warn "⚠️ggml_flash_attention_xmx.cpp NICHT IM WURZELVERZEICHNIS GEFUNDEN UEBERSPRINGE BAU VON EIGENEM KERNEL"
+        return 0
+        fi
+        log "🔷PATCH|10|c|12 VERSUCHE NEU DURCH VORHANDENE UMGEBUNGEN ZU LADEN"
+        mkdir -p "$CUSTOM_KERNEL_DIR"
+        cp "ggml_flash_attention_xmx.cpp" "$XMX_KERNEL_SRC"
+
+        sed -i 's/set(FA_OBJECT_FILES/ s/"[^"]*"/"& \"\$<TARGET_OBJECTS:ggml_flash_attention_sycl>")/set(FA_OBJECT_FILES "\$<TARGET_OBJECTS:ggml_flash_attention_sycl>" "\$<TARGET_OBJECTS:ggml_flash_attention_xmx>")/g' "${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/CMakeLists.txt"
+        elif ! grep -q "ggml_flash_attention_xmx" "$CMAKE_LISTS"; then
+
+        # 1. Schreibt Bau Regeln CMakeLists.txt
+        if [ -f "$CMAKE_LISTS" ] && ! grep -q "ggml_flash_attention_xmx" "$CMAKE_LISTS"; then
+            cat >> "$CMAKE_LISTS" << 'CMEOF'
+            add_library(ggml_flash_attention_xmx OBJECT ggml_flash_attention_xmx.cpp)
+            target_include_directories(ggml_flash_attention_xmx PRIVATE ${GGML_SYCL_INCLUDE_DIRS})
+            target_compile_options(ggml_flash_attention_xmx PUBLIC ${GGML_SYCL_COMPILE_FLAGS})
+CMEOF
+                fi
+                            # 2. Registriert Objekt File sed ueber Haupt CMakeLists.txt
+                                    if [ -f "$MAIN_CMAKE" ] && ! grep -q "ggml_flash_attention_xmx" "$MAIN_CMAKE"; then
+                                        sed -i 's/set(FA_OBJECT_FILES/ s/"[^"]*"/"& \"$<TARGET_OBJECTS:ggml_flash_attention_xmx>\""/')/set(FA_OBJECT_FILES "\       $<TARGET_OBJECTS:ggml_flash_attention_sycl>"
+                                        "\$<TARGET_OBJECTS:ggml_flash_attention_xmx>")/g' \
+                                        "$MAIN_CMAKE"; then
+                                            grep -q "add_subdirectory(custom_kernels)" "$MAIN_CMAKE" || \
+                                            echo "add_subdirectory(custom_kernels)" >> "$MAIN_CMAKE"
+                                                fi
+                                                log "🔷PATCH|10|c|12 ERFOLGREICH IN HAUPTPROGRAMM XAIGPUARC GELADEN"
+                                                    # 3. Injiziert C Funktions  Header  ggml-sycl.cpp
+                                                        if [ -f "$GGML_SYCL_CPP" ] && ! grep -q "ggml_sycl_op_flash_attn_xmx" "$GGML_SYCL_CPP"; then
+                                                            sed -i 's/#include "ggml-sycl.h"/a extern "C" void ggml_sycl_op_flash_attn_xmx(void* ctx, ggml_tensor* dst, const ggml_tensor* Q, const ggml_tensor* K, const ggml_tensor* V);' \
+                                                            "$GGML_SYCL_CPP"
+                                                                fi
+                                                                    # 4. LAUFZEIT VERTEILER Python
+                                                                        if [ -f "$GGML_SYCL_CPP" ] && grepq "case GGML_OP_FLASH_ATTN:" "$GGML_SYCL_CPP" && ! grep -q "xmx_avail" "$GGML_SYCL_CPP"; then
+                                                                        python3 -c "
+                                                                        import re, sys, os
+                                                                        cpp_file = "$GGML_SYCL_CPP"
+                                                                        cpp_file = os.environ.get('GGML_SYCL_CPP_ENV')
+
+                                                                        if not cpp_file or not os.path.exists(cpp_file):
+                                                                            print('Fehler: GGML_SYCL_CPP Pfad ist ungültig.')
+                                                                            sys.exit(0); then
+
+                                                                            try:
+                                                                            with open(cpp_file, 'r') as f:
+                                                                            content = f.read()
+                                                                            except Exception as e:
+                                                                            cpp_file = os.environ.get('GGML_SYCL_CPP_ENV')
+                                                                            print(f'Fehler beim Lesen der Datei: {e}')
+                                                                            sys.exit(0); then
+
+                                                                            try:
+                                                                            xmx(cpp_file, 'r') as f:
+                                                                            content = f.read()
+                                                                            except Exception as e:
+                                                                            cpp_file = "$XMX_KERNEL_CPP"
+                                                                            sys.exit(1)
+}'''
+# 5. SPEICHERGITTERZITTERN / XMX DISPATCHER REGEX DEFINITION
+        pattern = r'(case GGML_OP_FLASH_ATTN:\s*)({.*?break;\s*;})'
+        pattern = r'(case\s+GGML_OP_FLASH_ATTN\s*:\s*\{)(.*?)(\bbreak;\s*;)'
+        pattern = r'(case\s+GGML_OP_FLASH_ATTN\s*:\s*\{)(.*?)(\bbreak\s*;\})'
+        pattern = r'(case\s+GGML_OP_FLASH_ATTN\s*:\s*\{)(.*?)(\bbreak\s*;.*?\}?)'
+            replacement = r'''\1{
+                static bool xmx_avail = false;
+                static bool checked = false;
+                if (!checked) {
+                checked = true;
+                try {
+                sycl::queue q;
+                xmx_avail = q.get_device().has(sycl::aspect::ext_intel_matrix);
+                } catch(...) {}
+                }
+                if (xmx_avail && getenv(\"GGML_SYCL_USE_XMX_ATTN\")) {
+                                ggml_sycl_op_flash_attn_xmx(ctx, dst, Q, K, V);
+                            } else {
+                                ggml_flash_attention_sycl(ctx, dst, Q, K, V);
+                            }
+                            break;
+                        # 5.BECHTE REGELN BEI TREIBER UND HARDWARE MODERN CTXDTSQKV ALT CTXDSTSRC02
+                        }3'''
+                        # 6. Neue Inhalte Laden
+                        new_content, count = re.subn(pattern, replacement, content, flags=re.DOTALL)
+                        if count > 0:
+                            try:
+
+                            with open(cpp_file, 'w') as f:
+                            f.write(new_content)
+                            print("ERFOLRGREICH GGML_OP_FLASH_ATTN MIT XMX dispatcher EINGEBAUT")
+                            catch(...) {}
+                            else:
+                                print("KANN KEINE EIGENE GGML_OP_FLASH_ATTN WEITER")
+                                PYEOF
+                        # 8. Abschließend Abgleichen Speichern und Nutzen
+                        txt = open('$GGML_SYCL_CPP').read()
+                        old = re.search(r'case GGML_OP_FLASH_ATTN:.*?break;', txt, re.DOTALL)
+                        if old:
+                            new = '''    case GGML_OP_FLASH_ATTN: {
+                                static bool xmx_avail = false; static bool checked = false;
+                                if (!checked) { checked = true; try { sycl::queue q; xmx_avail = q.get_device().has(sycl::aspect::ext_intel_matrix); } catch(...) {} }
+                                if (xmx_avail && getenv(\"GGML_SYCL_USE_XMX_ATTN\")) {
+                                    ggml_sycl_op_flash_attn_xmx(ctx, dst, src0, src1, src2);
+                            } else {
+                                ggml_flash_attention_sycl(ctx, dst, src0, src1, src2);
+                                 catch(...) {}
+                            }
+                            break;
+}'''
+                                txt = txt[:old.start()] + new + txt[old.end():]
+                                open('$GGML_SYCL_CPP','w').write(txt)
+                                "
+                                success "✅PATCH|10|c|12 GGML_SYCL_CPP+XMX_KERNEL_CPP+GGML_FLASH_ATTENTION_SYCL_CPP DURCH INTELLIGENTEN VERTEILER XAIGPUARC AUF LOKALEM SYSTEM INJIZIERT"
+                                fi
+
+
+#|10|c|BIS 12 WIEDER EINFUEGEN
+
+#|11|12
+#|GRAFIKSPEICHERUEBERWACHUNGSAUTOMATIK QUANTISIERUNGS RUECKFALL
+patch_11_vram_model_guard() {
+
+log "🔷PATCH 11|12 GRAFIKSPEICHERUEBERWACHUNGSAUTOMATIK QUANTISIERUNGS RUECKFALL INITIALISIERUNG"
+
+local MODELS_DIR="models"
+local MODEL_PATH_REF="${MODEL_PATH:-models/MathTutor-7B-H_v0.0.1.f16.gguf}"
+
+#|MODELLE ORDNER PRUEFEN
+if [ ! -d "$MODELS_DIR" ]; then
+warn "⚠️PATCH 11|12 KEIN MODELLE ORDNER GEFUNDEN UEBERSPRINGE VRAM WAECHTER"
+return 0
+fi
+
+#|MODELL DATEI PRUEFEN
+if [ ! -f "$MODEL_PATH_REF" ]; then
+warn "⚠️PATCH 11|12 REFERENZMODELL NICHT GEFUNDEN'${MODEL_PATH_REF}'UEBERSPRINGE WAECHTER"
+return 0
+fi
+
+#|VERFUEGBARER GESAMTGRAFIKARTENSPEICHER
+local TOTAL_VRAM_MIB=0
+if [ -n "${ARC_VRAM_MIB:-}" ] && [ -n "${IGPU_VRAM_MIB:-}" ]; then
+TOTAL_VRAM_MIB=$(( ARC_VRAM_MIB + IGPU_VRAM_MIB ))
+log "🔷PATCH 11|12 DUAL GPU VRAM POOL ERKANNT ${ARC_VRAM_MIB}MiB + ${IGPU_VRAM_MIB}MiB = ${TOTAL_VRAM_MIB}MiB"
+elif [ -n "${ARC_VRAM_MIB:-}" ]; then
+TOTAL_VRAM_MIB="${ARC_VRAM_MIB}"
+log "🔷PATCH 11|12 EINZELGERAET DGPU VRAM ${TOTAL_VRAM_MIB}MiB"
+elif [ -n "${IGPU_VRAM_MIB:-}" ]; then
+TOTAL_VRAM_MIB="${IGPU_VRAM_MIB}"
+log "🔷PATCH 11|12 EINZELGERAET IGPU VRAM ${TOTAL_VRAM_MIB}MiB"
+else
+#|KEIN VRAM BEKANNT FALLBACK 12GiB DGPU MINIMUM
+TOTAL_VRAM_MIB=$(( 12 * 1024 ))
+warn "⚠️PATCH 11|12 VRAM UNBEKANNT FALLBACK AUF 12GiB ANNAHME"
+fi
+
+#|MODELL SPEICHERGROESSE IN MiB ERMITTELN
+local MODEL_SIZE_BYTES MODEL_SIZE_MIB
+MODEL_SIZE_BYTES=$(stat -c%s "$MODEL_PATH_REF" 2>/dev/null || echo 0)
+MODEL_SIZE_MIB=$(( MODEL_SIZE_BYTES / 1024 / 1024 ))
+
+log "🔷PATCH 11|12 MODELL GROESSE ${MODEL_SIZE_MIB}MiB VERFUEGBARER VRAM ${TOTAL_VRAM_MIB}MiB"
+
+#|SICHERHEITSRESERVE KONTEXT UND OVERHEAD
+local SAFE_VRAM_MIB=$(( TOTAL_VRAM_MIB * 90 / 100 ))
+
+#|PRUEFE PASSFORM FUER MODELLSPEICHER
+if [ "$MODEL_SIZE_MIB" -le "$SAFE_VRAM_MIB" ]; then
+success "✅PATCH 11|12 MODELL PASST IN VRAM ${MODEL_SIZE_MIB}MiB ${SAFE_VRAM_MIB}MiB KEIN RUECKFALL NOETIG"
+export MODEL_PATH="${MODEL_PATH_REF}"
+return 0
+fi
+
+warn "⚠️PATCH 11|12 MODELL ZU GROSS FUER VERFUEGBAREN VRAM ${MODEL_SIZE_MIB}MiB ${SAFE_VRAM_MIB}MiB"
+log "🔷PATCH 11|12 STARTE QUANTISIERUNGS RUECKFALL SUCHE IN '${MODELS_DIR}'"
+
+#|ALLE GGUF DATEIEN NACH GROESSE SORTIERT DURCHSUCHEN KLEINSTES PASSENDES NEHMEN
+#|EINZIGE REIHENFOLGE f16!
+local BEST_MODEL=""
+local BEST_SIZE_MIB=0
+
+#|ALLE GGUF IM ORDNER PRUEFEN
+local CANDIDATE
+while IFS= read -r CANDIDATE; do
+[ -f "$CANDIDATE" ] || continue
+local CAND_SIZE_BYTES CAND_SIZE_MIB
+CAND_SIZE_BYTES=$(stat -c%s "$CANDIDATE" 2>/dev/null || echo 0)
+CAND_SIZE_MIB=$(( CAND_SIZE_BYTES / 1024 / 1024 ))
+
+#|NUR KLEINERE BEI SICHEREM VRAM KLEINER BISHERIGES BESTES
+if [ "$CAND_SIZE_MIB" -le "$SAFE_VRAM_MIB" ] && [ "$CAND_SIZE_MIB" -lt "$BEST_SIZE_MIB" ]; then
+BEST_MODEL="$CANDIDATE"
+BEST_SIZE_MIB="$CAND_SIZE_MIB"
+fi
+done < <(find "$MODELS_DIR" -maxdepth 2 -name "*.gguf" | sort)
+
+#|ERGEBNIS AUSWERTEN
+if [ -n "$BEST_MODEL" ]; then
+success "✅PATCH 11|12 RUECKFALL MODELL GEFUNDEN '${BEST_MODEL}' (${BEST_SIZE_MIB}MiB)"
+warn "⚠️PATCH 11|12 LADE KLEINERES MODELL STATT '${MODEL_PATH_REF}' (${MODEL_SIZE_MIB}MiB)"
+export MODEL_PATH="${BEST_MODEL}"
+log "🔷PATCH 11|12 MODELL PFAD GESETZT AUF RUECKFALL ${MODEL_PATH}"
+else
+error "❌PATCH 11|12 KEIN PASSENDES MODELL UNTER ${SAFE_VRAM_MIB}MiB IN'${MODELS_DIR}'GEFUNDEN"
+warn "⚠️PATCH 11|12 STARTE TROTZDEM MIT ORIGINALMODELL SPEICHERUEBERLAUF MOEGLICH"
+export MODEL_PATH="${MODEL_PATH_REF}"
+fi
+
+log "🔷PATCH 11|12 VRAM MODELL WAECHTER ABGESCHLOSSEN"
+}
+
+#|PATCH 12|12
+#|XAIGPUARC_PROFILIER_PID
+#|TOKENERSTELLUNG PRO SEKUNDE GRAFIKSPEICHERAUSLASTUNG TEMPERATUR NACH INFERENZ START
+
+patch_12_sycl_perf_profiler() {
+log "🔷PATCH 12|12 SYCL LEISTUNGS PROFILER KOPFZEILENEINTRAEGE INITIALISIERUNG"
+
+local PROFILER_SCRIPT="${BUILD_DIR}/XAIGPUARC_PROFILIER_PID.sh"
+local PROFILER_LOG="${BUILD_DIR}/xaigpuarc_perf.log"
+local SYCL_FILE="${LLAMA_CPP_DIR}/ggml/src/ggml-sycl/ggml-sycl.cpp"
+
+#|PRUEFE OB GGML SYCL CPP VORHANDEN
+if [ ! -f "$SYCL_FILE" ]; then
+warn "⚠️PATCH 12|12 GGML SYCL CPP NICHT GEFUNDEN PROFILER UEBERSPRUNGEN"
+return 0
+fi
+
+#|SYCL TIMER KOPFZEILENEINTRAEGE IN GGML SYCL CPP INJIZIEREN
+#|NUR WENN NOCH KEIN XAIGPUARC PROFILER MARKER VORHANDEN
+if ! grep -q "XAIGPUARC_PROFILIER_PID" "$SYCL_FILE"; then
+log "🔷PATCH 12|12 INJIZIERE SYCL TIMER MARKER IN GGML SYCL CPP"
+
+#|SYCL EVENT TIMER NACH QUEUE SUBMIT EINFUEGEN
+sed -i '/#include "ggml-sycl.h"/a \
+
+// XAIGPUARC_PROFILIER_PID LEISTUNGSMESSUNG Kopfzeileneintraege\n\
+#include <chrono>\n\
+static std::chrono::steady_clock::time_point xaigpuarc_t0;\n\
+static uint64_t xaigpuarc_op_count = 0;\n\
+static double xaigpuarc_total_ms = 0.0;' "$SYCL_FILE"
+
+if grep -q "XAIGPUARC_PROFILIER_PID" "$SYCL_FILE"; then
+success "✅PATCH 12|12 XAIGPUARC_PROFILIER_PID SYCL TIMER MARKER ERFOLGREICH INJIZIERT"
+else
+warn "⚠️PATCH 12|12 XAIGPUARC_PROFILIER_PID SYCL TIMER MARKER INJEKTION FEHLGESCHLAGEN FAHRE TROTZDEM FORT"
+fi
+else
+log "🔷PATCH 12|12 XAIGPUARC_PROFILIER_PID SYCL PROFILER MARKER BEREITS VORHANDEN UEBERSPRINGE INJEKTION"
+fi
+
+#|PROFILER SHELL SKRIPT SCHREIBEN
+#|LIEST INTEL GPU AUSLASTUNG VRAM TEMPERATUR SYSFS ZES
+log "🔷PATCH 12|12 SCHREIBE PROFILER HILFSSKRIPT'${PROFILER_SCRIPT}'"
+mkdir -p "${BUILD_DIR}"
+
+cat > "$PROFILER_SCRIPT" << 'PROFEOF'
+#!/bin/bash
+#|XAIGPUARC LEISTUNGS PROFILER HILFSSKRIPT
+#|LIEST INTEL ARC DGPU METRIKEN UEBER SYSFS ZES
+
+PROFILER_LOG="${1:-XAIGPUARC/xaigpuarc_perf.log}"
+INTERVAL_SEC="${2:-2}"
+MAX_SAMPLES="${3:-30}"
+log_p() { printf "[XAIGPUARC_PROFILIER_PID] %s\n" "$*"; }
+
+#|INTEL GPU SYSFS PFAD SUCHEN
+INTEL_SYSFS_GPU=""
+for D in /sys/class/drm/card*/device; do
+VENDOR=$(cat "$D/vendor" 2>/dev/null || echo "")
+if [ "$VENDOR" = "0x8086" ]; then
+INTEL_SYSFS_GPU="$D"
+break
+fi
+done
+
+#|ZES SYSMAN AUSLASTUNG LESEN
+read_gpu_util() {
+if [ -n "$INTEL_SYSFS_GPU" ]; then
+local UTIL_FILE="${INTEL_SYSFS_GPU}/drm/card0/gt/gt0/rcs0/busy"
+[ -f "$UTIL_FILE" ] && cat "$UTIL_FILE" 2>/dev/null || echo "N/A"
+else
+echo "N/A"
+fi
+}
+
+#|VRAM AUSLASTUNG LESEN
+read_vram_used_mib() {
+if [ -n "$INTEL_SYSFS_GPU" ]; then
+local MEM_FILE="${INTEL_SYSFS_GPU}/mem_info_vram_used"
+if [ -f "$MEM_FILE" ]; then
+local RAW=$(cat "$MEM_FILE" 2>/dev/null || echo 0)
+echo $(( RAW / 1024 / 1024 ))
+else
+echo "N/A"
+fi
+else
+echo "N/A"
+fi
+}
+
+#|TEMPERATUR LESEN UEBER HWMON
+read_gpu_temp() {
+for HWMON in /sys/class/hwmon/hwmon*/; do
+local NAME=$(cat "${HWMON}name" 2>/dev/null || echo "")
+if echo "$NAME" | grep -qi "i915\|xe\|intel"; then
+local TEMP_FILE="${HWMON}temp1_input"
+if [ -f "$TEMP_FILE" ]; then
+local RAW=$(cat "$TEMP_FILE" 2>/dev/null || echo 0)
+echo $(( RAW / 1000 ))
+return
+fi
+fi
+done
+echo "N/A"
+}
+
+#|XAIGPUARC_PROFILIER_PID PROTOKOLL KOPFZEILE
+{
+echo "# XAIGPUARC_PROFILIER_PID LEISTUNGSPROTOKOLL $(date '+%Y-%m-%d %H:%M:%S')"
+echo "# ZEITSTEMPEL | GPU_AUSLASTUNG VRAM_GENUTZT_MiB TEMP_GRAD_C"
+} > "$PROFILER_LOG"
+
+log_p "STARTE XAIGPUARC_PROFILIER_PID MESSUNG INTERVALL ${INTERVAL_SEC}s MAX PROBEN ${MAX_SAMPLES}"
+log_p "PROTOKOLL: ${PROFILER_LOG}"
+
+SAMPLE=0
+while [ "$SAMPLE" -lt "$MAX_SAMPLES" ]; do
+TS=$(date '+%H:%M:%S')
+UTIL=$(read_gpu_util)
+VRAM=$(read_vram_used_mib)
+TEMP=$(read_gpu_temp)
+ZEILE="${TS} | GPU:${UTIL}% | VRAM:${VRAM}MiB | TEMP:${TEMP}C"
+echo "$ZEILE" >> "$PROFILER_LOG"
+log_p "$ZEILE"
+SAMPLE=$(( SAMPLE + 1 ))
+sleep "$INTERVAL_SEC"
+done
+
+log_p "XAIGPUARC_PROFILIER_PID MESSUNG ABGESCHLOSSEN PROTOKOLL GESPEICHERT ${PROFILER_LOG}"
+PROFEOF
+
+chmod +x "$PROFILER_SCRIPT"
+
+if [ -x "$PROFILER_SCRIPT" ]; then
+success "✅PATCH 12|12 XAIGPUARC_PROFILIER_PID GESCHRIEBEN UND AUSFUEHRBAR'${PROFILER_SCRIPT}'"
+else
+error "❌PATCH 12|12 XAIGPUARC_PROFILIER_PID KONNTE NICHT GESCHRIEBEN WERDEN"
+return 1
+fi
+
+#|PROFILER IM HINTERGRUND STARTEN WENN INFERENZ LAEUFT
+#|AUTOMATISCH NACH MAX_SAMPLES BEENDET
+log "🔷PATCH 12|12 AKTIVIERE HINTERGRUND PROFILER BEIM NAECHSTEN INFERENZ START"
+
+#|WRAPPER FUNKTION FUER AUTOMATISCHEN PROFILER START
+#|MUSS IN run_inference VOR DEM LLAMA-CLI AUFRUF EINGEBUNDEN WERDEN
+xaigpuarc_start_profiler() {
+local LOG="${PROFILER_LOG}"
+local SCRIPT="${PROFILER_SCRIPT}"
+if [ -x "$SCRIPT" ]; then
+log "🔷PATCH 12|12 STARTE HINTERGRUND XAIGPUARC_PROFILIER_PID WIRD GESPEICHERT"
+bash "$SCRIPT" "$LOG" 2 60 &
+export XAIGPUARC_PROFILIER_PID=$!
+log "🔷PATCH 12|12 PROFILER LAEUFT PID:${XAIGPUARC_PROFILIER_PID} LOG:${XAIGPUARC_PROFILIER_PID_LOG}"
+fi
+}
+export -f xaigpuarc_start_profiler
+
+#|STOPP FUNKTION FUER SAUBERES BEENDEN
+xaigpuarc_stop_profiler() {
+if [ -n "${XAIGPUARC_PROFILIER_PID:-}" ]; then
+kill "${XAIGPUARC_PROFILIER_PID}" 2>/dev/null || true
+success "✅PATCH 12|12 PROFILER GESTOPPT PID:${XAIGPUARC_PROFILIER_PID}"
+if [ -f "${PROFILER_LOG}" ]; then
+local LINES=$(wc -l < "${PROFILER_LOG}")
+log "🔷PATCH 12|12 PROTOKOLL ENTHAELT ${LINES} MESSUNGEN ${XAIGPUARC_PROFILIER_PID_LOG}"
+fi
+fi
+}
+export -f xaigpuarc_stop_profiler
+
+success "✅PATCH 12|12 SYCL LEISTUNGS PROFILER VOLLSTAENDIG EINGEBAUT"
+log "🔷PATCH 12|12 STARTE PROFILER MIT: xaigpuarc_start_profiler"
+log "🔷PATCH 12|12 STOPPE PROFILER MIT: xaigpuarc_stop_profiler"
+log "🔷PATCH 12|12 PROTOKOLL WIRD NACH INFERENZ GESPEICHERT UNTER: ${XAIGPUARC_PROFILIER_PID_LOG}"
+}
+#|3|BAUKONFIGURATION
+configure_build() {
+log "🔷BEREITE KOPFZEILEN BAUVORGANG VOR"
+local FP_MODE="${1:-1}"
+local SYCL_FLAGS="-DGGML_SYCL_F16=${FP_MODE} -fsycl-device-code-split=per_kernel"
+if [ ! -d "${BUILD_DIR}" ]; then
+log "🔷LEGE XAIGPUARC IN ORDNER HOME ${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}" || { error "❌KONNTE ORDNER XAIGPUARC'${BUILD_DIR}'NICHT ANLEGEN"; return 1; }
+fi
+if pushd "${BUILD_DIR}" > /dev/null; then
+log "🔷STARTE CMAKE TXT KOPFZEILENBAU XAIGPUARC ${FP_FLAG:-FP_MODE}"
+cmake "../${LLAMA_CPP_DIR}" \
+    -G "Unix Makefiles" \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+    -DGGML_SYCL=ON \
+    -DGGML_SYCL_TARGET=INTEL \
+    -DGGML_SYCL_CCACHE=ON \
+    -DGGML_SYCL_F16=${FP_MODE} \
+    -DGGML_SYCL_FLASH_ATTN=ON \
+    -DGGML_SYCL_MKL_SYCL_BATCH_GEMM=1 \
+    -DCMAKE_C_COMPILER=icx \
+    -DCMAKE_CXX_COMPILER=icpx \
+    -DCMAKE_CXX_STANDARD=23 \
+    -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+    -DCMAKE_CXX_EXTENSIONS=ON \
+    -DGGML_SYCL_PRIORITIZE_DMMV=ON \
+    -DGGML_SYCL_DISABLE_DNN=OFF \
+    -DTHREADS_PREFER_PTHREAD_FLAG=ON \
+    -DCMAKE_C_FLAGS="-O3 -ffast-math" \
+    -DGGML_SYCL_DISABLE_GRAPH=OFF \
+    -DCMAKE_THREAD_LIBS_INIT="-pthread"\
+    -DCMAKE_C_COMPILER_WORKS=1
+local CMAKE_STATUS=$?
+popd > /dev/null
+if [ ${CMAKE_STATUS} -ne 0 ]; then
+error "❌CMAKE TXTKOPFZEILEN SCHREIBEN FEHLGESCHLAGEN"
+return 1
+fi
+success "✅VORBAU ABGESCHLOSSEN"
+else
+error "❌KONNTE NICHT NACH HOME/XAIGPUARC WECHSELN'${BUILD_DIR}'COMPUTER NUTZER BERECHTIGUNG PRUEFEN"
+return 1
+fi
+}
+
+#|4|KOMPILIEREN
+compile_project() {
+log "🔷BAUE XAIGPUARC GRUND GERUEST STRUKTUR"
+local LOG_FILE="build.log"
+log "🔷KOPFZEILEN AUSGABE UNTERORNDER GESPEICHERT"
+log "🔷BAUVORGANG LAEUFT XAIGPUARC SYCL C++ LEVEL ZERO KOPFZEILEN SCHREIBEN ABGESCHLOSSEN"
+if pushd "${BUILD_DIR}" > /dev/null; then
+log "🔷VORBBAU IN HAUPTORDNER GESCHICKT STARTE INSTALLATION UND DANNACH/ODER KI-INFERENZ
+|🟢|XAIGPUARC
+|🔧INSTALLATION auf ihrem Endgeraet in 🧰 .../HOME/USERNAME/XAIGPUARC/..."
+cmake --build . --verbose --config "${CMAKE_BUILD_TYPE}" -j ${NPROC} --target llama-cli llama-ls-sycl-device > "${LOG_FILE}" 2>&1
+
+
+# ATTENTION WISPER SYCLE NATIVE BAU
+log "🔷KOMPILIERE AUDIO-STT UNTERPROGRAMM (WHISPER SYCL)"
+cmake "../${WHISPER_CPP_DIR}" -B whisper_build -DGGML_SYCL=ON -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx > /dev/null 2>&1
+cmake --build whisper_build --config "${CMAKE_BUILD_TYPE}" -j ${NPROC} --target whisper-cli >> build.log 2>&1
+cp whisper_build/bin/whisper-cli ./bin/
+popd > /dev/null
+fi
+local BUILD_STATUS=$?
+
+if [ ${BUILD_STATUS} -ne 0 ]; then popd > /dev/null
+error "❌XAIGPUARC KOPFZEILEN FEHLGESCHLAGEN UEBERPRUEFEN**${BUILD_DIR}/${LOG_FILE}**"
+return 1
+fi
+success "✅BAU XAIGPUARC ERFOLGREICH"
+else
+error "❌XAIGPUARC '${BUILD_DIR}' WEGEN FEHLERHAFTEM WECHSEL KOPZEILENBAU NICHT MOEGLICH"
+return 1
+fi
+}
+#wi6
+#|5|AUTOMATISCHE GERAETEAUSWAHL
+auto_select_device() {
+local FULL_LS_PATH="./${BUILD_DIR}/${LS_SYCL_DEVICE_PATH}"
+log "🔷SUCHE NACH VERFUEGBAREN SYCL GERAETEN AUF IHREM SYSTEM"
+
+if [ ! -x "${FULL_LS_PATH}" ]; then
+warn "⚠️SYCL UNTERBAU NICHT GEFUNDEN ${FULL_LS_PATH} ZWEITSUCHE ODER RUECKFALL AUF CPU"
+export ONEAPI_DEVICE_SELECTOR="level_zero:0"
+DEVICE="DUAL"
+return
+fi
+
+#|DOPPELTE GERAETEABFRAGE
+log "🔷 STARTE ERSTE GERAETEABFRAGE"
+export ONEAPI_DEVICE_SELECTOR="level_zero:gpu"
+local DEVICES
+DEVICES=$("${FULL_LS_PATH}" 2>&1 || true)
+
+if [ -z "$DEVICES" ]; then
+warn "⚠️KEINE KOMPATIBLEN SYCL GERAETE GEFUNDEN! RUECKFALL AUF EINZELGERAET"
+export ONEAPI_DEVICE_SELECTOR="level_zero:0"
+DEVICE="DUAL"
+N_GPU_LAYERS=99
+return
+fi
+
+#|ERSTER SUCHLAUF DOPPEL GPU
+local ARC_LINE IGPU_LINE ARC_ID IGPU_ID
+ARC_LINE=$(echo "$DEVICES" | grep -i "Intel *Arc.*Graphics" | head -n1)
+IGPU_LINE=$(echo "$DEVICES" | grep -i "Iris.*Xe.*Graphics" | head -n1)
+
+#|SUCHFEHLER GPU ZWEITER DURCHLAUF
+if [ -z "$ARC_LINE" ] || [ -z "$IGPU_LINE" ]; then
+warn "⚠️ SUCHFEHLER ERKANNT ODER GERAET FEHLT STARTE ZWEITEN DURCHLAUF"
+sleep 1
+export ONEAPI_DEVICE_SELECTOR="level_zero:gpu"
+DEVICES=$("${FULL_LS_PATH}" 2>&1 || true)
+[ -z "$ARC_LINE" ]  && ARC_LINE=$(echo "$DEVICES"  | grep -i "Intel *Arc.*Graphics" | head -n1)
+[ -z "$IGPU_LINE" ] && IGPU_LINE=$(echo "$DEVICES" | grep -i "Iris.*Xe.*Graphics"  | head -n1)
+fi
+
+#|ENDE DOPPELTE GERAETEABFRAGE
+ARC_ID=$(echo "$ARC_LINE"  | sed -n 's/.*level_zero:gpu:\([0-9]\+\)].*/\1/p')
+IGPU_ID=$(echo "$IGPU_LINE" | sed -n 's/.*level_zero:gpu:\([0-9]\+\)].*/\1/p')
+
+#|VRAM BERECHNUNG HILFSFUNKTION MiB SYCL AUS ZEILEN LESEN
+get_vram_mib_from_line() {
+local line="$1"
+local fallback_gib="$2"
+local raw
+raw=$(echo "$line" | awk -F'|' '{gsub(/ /,"",$8); print $8}' | grep -oP '\d+(?=M)')
+if [ -n "$raw" ] && [ "$raw" -gt 0 ] 2>/dev/null; then
+echo "$raw"
+else
+echo $(( fallback_gib * 1024 ))
+fi
+}
+
+#|DUALER MODUS: dGPU + iGPU zusammen
+if [ -n "$ARC_ID" ] && [ -n "$IGPU_ID" ]; then
+log "🔷DUAL-GPU MODUS AKTIV: dGPU(${ARC_ID}) + iGPU(${IGPU_ID}) VRAM POOL"
+
+#|NUMERISCHE IDs AUS LEVEL_ZERO X EXTRAHIEREN
+local ARC_NUM="$ARC_ID"
+local IGPU_NUM="$IGPU_ID"
+
+#|VRAM  DUAL GPU BERECHNEN
+local ARC_VRAM_MIB IGPU_VRAM_MIB
+ARC_VRAM_MIB=$(get_vram_mib_from_line "$ARC_LINE" 12)
+#|iGPU TEILT SICH ARBEITSSPEICHER MIT CPU RUECKFALL IGPU_VRAM_FALLBACK_GIB
+IGPU_VRAM_MIB=$(get_vram_mib_from_line "$IGPU_LINE" "${IGPU_VRAM_FALLBACK_GIB}")
+#|BETRIEBSSYSTEMRESERVE ABZIEHEN
+local IGPU_RESERVE_MIB=$(( IGPU_VRAM_RESERVE_GIB * 1024 ))
+IGPU_VRAM_MIB=$(( IGPU_VRAM_MIB - IGPU_RESERVE_MIB ))
+if [ "$IGPU_VRAM_MIB" -lt 1024 ]; then
+IGPU_VRAM_MIB=1024
+fi
+
+local TOTAL_VRAM_MIB=$(( ARC_VRAM_MIB + IGPU_VRAM_MIB ))
+local TOTAL_VRAM_GIB=$(( TOTAL_VRAM_MIB / 1024 ))
+
+#|TENSOR SPLIT AUS BERECHNETEN GRAFIKSPEICHERWERTEN SETZEN RELATIVE MiB GEWICHTE
+TENSOR_SPLIT_DGPU="${ARC_VRAM_MIB}"
+TENSOR_SPLIT_IGPU="${IGPU_VRAM_MIB}"
+TENSOR_SPLIT="${TENSOR_SPLIT_DGPU},${TENSOR_SPLIT_IGPU}"
+export TENSOR_SPLIT
+
+#|HAUPTGPU = dGPU (ARC) FUER SCHNELLES ANTWORT SCHREIBEN
+MAIN_GPU_ID=""
+export MAIN_GPU_ID
+
+N_GPU_LAYERS=99
+success "✅DUAL-GPU VRAM POOL: dGPU~$((ARC_VRAM_MIB/1024))GiB + iGPU~$((IGPU_VRAM_MIB/1024))GiB = GESAMT~${TOTAL_VRAM_GIB}GiB"
+log "🔷TENSOR-SPLIT dGPU:iGPU = ${ARC_VRAM_MIB}:${IGPU_VRAM_MIB} MiB"
+log "🔷HAUPTGERAET DGPU ID:${ARC_NUM} ALLE SCHICHTEN GPU VERTEILT NGL:${N_GPU_LAYERS}"
+
+#|EINZELMODUS FALLBACK dGPU
+elif [ -n "$ARC_ID" ]; then
+local ARC_NUM
+ARC_NUM=$(echo "$ARC_ID" | grep -oP '\d+$')
+export ONEAPI_DEVICE_SELECTOR="level_zero:${ARC_NUM}"
+DEVICE="ARC"
+MAIN_GPU_ID="${ARC_NUM}"
+local ARC_VRAM_MIB
+ARC_VRAM_MIB=$(get_vram_mib_from_line "$ARC_LINE" 12)
+N_GPU_LAYERS=$(( ARC_VRAM_MIB * 99 / 100 / 1024 ))
+[ "$N_GPU_LAYERS" -gt 99 ] && N_GPU_LAYERS=99
+[ "$N_GPU_LAYERS" -lt 1 ] && N_GPU_LAYERS=1
+TENSOR_SPLIT_DGPU="" ; TENSOR_SPLIT_IGPU=""
+warn "⚠️NUR DGPU GEFUNDEN EINZELMODUS AKTIV NGL:${N_GPU_LAYERS}"
+
+#|EINZELMODUS FALLBACK NUR dGPU
+elif [ -n "$IGPU_ID" ]; then
+local IGPU_NUM
+IGPU_NUM=$(echo "$IGPU_ID" | grep -oP '\d+$')
+export ONEAPI_DEVICE_SELECTOR="level_zero:${IGPU_NUM}"
+DEVICE="iGPU"
+MAIN_GPU_ID="${IGPU_NUM}"
+local IGPU_VRAM_MIB=$(( IGPU_VRAM_FALLBACK_GIB * 1024 ))
+N_GPU_LAYERS=$(( IGPU_VRAM_MIB * 99 / 100 / 1024 ))
+[ "$N_GPU_LAYERS" -gt 99 ] && N_GPU_LAYERS=99
+[ "$N_GPU_LAYERS" -lt 1 ] && N_GPU_LAYERS=1
+TENSOR_SPLIT_DGPU="" ; TENSOR_SPLIT_IGPU=""
+warn "⚠️NUR IGPU GEFUNDEN EINZELMODUS AKTIV NGL:${N_GPU_LAYERS}"
+
+else
+export ONEAPI_DEVICE_SELECTOR="opencl:cpu"
+DEVICE="CPU"
+N_GPU_LAYERS=99
+TENSOR_SPLIT_DGPU="" ; TENSOR_SPLIT_IGPU=""
+error "❌KEINE GEEIGNETE GRAFIKKARTE GEFUNDEN FALLE ENDGUELTIG AUF CPU ZURUECK"
+fi
+}
+
+#|6|SYCLKOMPATIBLE GERAETE PRUEFEN
+list_sycl_devices() {
+log "🔷SUCHE ZWEIMAL HINTEREINANDER SYCL FAEHIGES GERAET UM SUCHFEHLER ZU UMGEHEN"
+local FULL_LS_PATH="./${BUILD_DIR}/${LS_SYCL_DEVICE_PATH}"
+export ONEAPI_DEVICE_SELECTOR="level_zero:gpu"
+if [ -f "${FULL_LS_PATH}" ]; then
+"${FULL_LS_PATH}"
+else
+warn "⚠️AKTUELL KEIN SYCL GERAET GEFUNDEN ${FULL_LS_PATH} VERSUCH ZWEI SUCHE"
+fi
+}
+
+
+#|MN-Funhouse-12B.fp16INTELLECT-1-Instruct-f16
+#|RUECKFALL Orchestrator-8B-f16_q8_0
+#|STANDART MathTutor-7B-H_v0.0.1.f16.gguf 128k ctx81920
+#|deepseek-coder-33b-instruct.Q8_0
+#|orpheus-3b-0.1-ft-F16
+
+#|7|MODELLORT BEDARF AUTOMATISCH AENDERN
+#DANGER
+#ATTENTION
+#DANGER
+#ATTENTION
+#DANGER
+#ATTENTION
+#DANGER
+#ATTENTION
+prepare_model() {
+MODEL_PATH=${1:-"models/MathTutor-7B-H_v0.0.1.f16.gguf"}
+WHISPER_MODEL_PATH="models/ggml-large-v3-turbo.gguf"
+#wi7
+#DANGER
+mkdir -p models
+if [ ! -f "$MODEL_PATH" ]; then
+warn "⚠️IHR MODELL NICHT UNTER HOME/IHRNAME/MODELS GEFUNDEN BITTE DORT HIN**$MODEL_PATH**KOPIEREN"
+fi
+if [ ! -f "$WHISPER_MODEL_PATH" ]; then
+    log "🔷 LADE WISPER MODELL: Large-V3-Turbo..."
+    curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin" \
+        -o "$WHISPER_MODEL_PATH" || {
+        error "❌ WISPER MODELL DOWNLOAD FEHLGESCHLAGEN PFADE IN XAIGPUARC MANUELL AENDERN"
+        return 1
+    }
+fi
+#wi8
+fi
+export MODEL_PATH
+export WHISPER_MODEL_PATH
+}
+
+#wi9
+#ATTENTION
+# AUDIOSPRACHMODULSTEUERUNGSAUSWAHLAUTOMAT
+# ============================================================
+# - Automatische Auswahl potentieller Audio Hilsprozessoren Rueckfall auf CPU
+# - reine Sprachsteuerung eines Sprachmodells ueber das geoeffnete Terminal
+# - Diktieren von Prompts und laengeren Gespraechsverlaeufen moeglich
+# - Sprachsteuerungsbefehle: ENTER, KORREKTUR, START, STOP, PAUSE
+# - Nutzung von Intel NPU/GNA und Audio Coprozessoren uber SYCL angebunden zur Rauschunterdrueckung
+
+
+#AUDIOSPRACHMODULSTEUERUNGSAUSWAHLAUTOMAT
+
+#|1.) NATIVE AUDIO SCHLEIFE SPRACHMODUL AUTOMATISCHE RECHENEINHEITENAUSWAHL NPU GNA CPU
+initialize_audio_hardware() {
+    log "🔷 INITIALISIERE AUDIO PROZESSOREN"
+
+    # INTEL NPU GNA OPEN VINO
+    if [[ -d "/opt/intel/openvino" ]] || command -v benchmark_app &>/dev/null; then
+        success "✅ INTEL NPU TREIBER (OPENVINO) GEFUNDEN → nutze NPU"
+        AUDIO_DEVICE="NPU"
+
+        # Zusätzlich GNA Rauschfilter prüfen (meist parallel nutzbar)
+        if [[ -d "/opt/intel/openvino" ]] || command -v benchmark_app &>/dev/null; then
+            success "✅ INTEL GNA RAUSCHFILTER (OPENVINO) GEFUNDEN"
+            # GNA Hardware-Entrauschung über ALSA aktivieren
+            if amixer sset 'Mic Capture Filter' 'Noise-Reduction' &>/dev/null; then
+                success "✅ INTEL GNA HARDWARE RAUSCHFILTER AKTIVIERT"
+            else
+                warn "⚠️ INTEL GNA HARDWARE RAUSCHFILTER KONNTE NICHT GESETZT WERDEN ALSA FEHLER PIPEWIRE SUPPORT WIRD GETESTET"
+            fi
+            try
+        fi
+    else
+        warn "⚠️ NPU/GNA TREIBER NICHT GEFUNDEN WECHSELE AUF CPU VECTOREINHEITEN"
+        AUDIO_DEVICE="CPU"
+    fi
+}
+
+# 2.) KERN AUDIO AUFNAHME SPRACHERKENNUNG PRO BLOCK BERECHNET
+# GIBT LEERE AUSGABE ZURUECK WENN KEINE AUDIO ZU TEXT VERSTANDEN WURDE
+record_and_transcribe() {
+    local audio_file="$AUDIO_TMP"
+    local txt_file="${TXT_TMP}.txt"
+ # GNA ENTRAUSCHPROZESSOR FILTERT UMGEBUNGSGERAEUSCHE AUS AUFNAHME
+    arecord -d 4 -f S16_LE -r 16000 -c 1 "$AUDIO_TMP" &>/dev/null
+    # VIER SEKUNDEN AUFNAHMEABSTAND 16Khz MONO
+    if [[ $? -ne 0 ]]; then
+        warn "⚠️ arecord fehlgeschlagen – Mikrofon verfügbar?"
+        return 1
+    fi
+
+    # WHISPER TRASKRIPTION VON NPU|GNA|CPU UEBER SYCL
+    ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+    "${BUILD_DIR}/bin/whisper-cli" \
+        -m "$WHISPER_MODEL_PATH" \
+        -f "$audio_file" \
+        -ng 1 \
+        -otxt "$TXT_TMP" \
+        -ac 512 \
+        --prompt "ENTER, KORREKTUR, ENDE, START, PAUSE" \
+        --language de &>/dev/null
+
+    #ERGEBNIS AUSLESEN
+    if [[ -f "$txt_file" ]]; then
+        local recognized
+        recognized=$(cat "$txt_file" | tr '[:upper:]' '[:lower:]' | xargs)
+        rm -f "$txt_file"
+
+        if [[ -z "$recognized" ]]; then
+            return 1   # KEINE STIMMAUFNAHME GEFUNDEN
+        fi
+        echo "$recognized"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 3.) HAUPTAUDIOSCHLEIFE
+# SPEICHER TEXTBAUSTEINE VON AUDIOEINGABE UND STEUERT XAIGPUARC PER AUDIOBEFEHL ENTER/KORREKTUR/PAUSE/START/STOP
+start_audio_stream_listener() {
+    log "🔷 STARTE SPRACHMODELLDIKTATFUNKTIONSAUFNAHME"
+    warn "⚠️ BEFEHLE '${CODEWORD_ENTER}'BEENDE SPRACHAUFNAME SENDE DIKTAT AN HAUPTSPRACHPROGRAMM '${CODEWORD_KORREKTUR}' LOESCHE SPRACHAUFNAME UND STARTE NEUE '${CODEWORD_PAUSE}' PAUSIERE SPRACHAUFNAME '${CODEWORD_START}' RAKTIVIERE SPRACHAUFNAHME '${CODEWORD_STOP}' BEENDET XAIGPUARC"
+
+    while [[ $LISTENING -eq 1 ]]; do
+        #WENN PAUSE DANN PAUSE FUER DIE PAUSE ANSCHLIESSEND FORTFAHREN
+        if [[ $PAUSED -eq 1 ]]; then
+            sleep 1
+            continue
+        fi
+
+        #|SPRACHAUFNAHME IN KLEINEN STUECKEN STARTEN UND SPEICHERN
+        local spoken
+        spoken=$(record_and_transcribe)
+        if [[ $? -ne 0 || -z "$spoken" ]]; then
+            continue   # KEIN DIKTAT AUFGENOMMEN VERBINDUNG WEITER OFFEN
+        fi
+
+        # ---------- Befehlsauswertung ----------
+        if [[ "$spoken" == *"$CODEWORD_ENTER"* ]]; then
+            #ENTER FUEGT HAUPTPROMT DER SPRACHAUSGABEMODULE IN DAS HAUPTSPRACHMODELL VON XAIGPUARC ZUR AUSWERTUNG EIN
+            #LOESCHT DAS CODEWORT AUS DEM DIKTATTEXTPROMPT FUER SAUBERES INJIZIEREN VON ANWEISUNGEN
+            local text_part="${spoken%$CODEWORD_ENTER}"
+            ACCUMULATED_PROMPT="${ACCUMULATED_PROMPT} ${text_part}"
+            #RUECKKEHR ZU HAUPTEBENE SETZT FINALEN PROMPT FUER GROSSES SPRACHMODELL NACH DIKTATFUNKTION UND BEREINIGUNG DER SPRACHAUFNAHME
+            FINAL_VOICE_PROMPT=$(echo "$ACCUMULATED_PROMPT" | xargs)
+            success "✅ SENDE AUDIODIKTAT IN TEXTFORM BEREINIGT AN HAUPTSPRACHMODELL XAIGPUARC ZUR AUSWERTUNG DER AUFNAHME \"${FINAL_VOICE_PROMPT}\""
+            break   # VERLAESST WIHLE SCHLEIFE ZUM AUFRUFER ZURUECK
+
+        elif [[ "$spoken" == *"$CODEWORD_KORREKTUR"* ]]; then
+            # KORREKTUR BISHERIGES DIKTAT LOESCHEN UND NEUES BEGINNEN
+            ACCUMULATED_PROMPT=""
+            warn "⚠️ STARTE NEUE AUFNAHME ALTE AUFNAME GELOESCHT"
+            continue
+
+        elif [[ "$spoken" == *"$CODEWORD_STOP"* ]]; then
+            # ENDE BEENDE XAIGPUARC
+            success "✅ BEENDE ✅ XAIGPUARC ✅DANKE FUER DIE NUTZUNG VON XAIGPUARC ✅ AUF WIEDERSEHEN✅"
+            LISTENING=0
+            exit 0
+
+        elif [[ "$spoken" == *"$CODEWORD_PAUSE"* ]]; then
+            # PAUSE AUFNAME ANHALTEN
+            if [[ $PAUSED -eq 0 ]]; then
+                PAUSED=1
+                success "✅ SPRACHERKENNUNG PAUSIERT /// SPRICH->///START//<- FUER WIEDERAUNAHME SPRACHDIKTAT"
+            fi
+            continue
+
+        elif [[ "$spoken" == *"$CODEWORD_START"* ]]; then
+            # START PAUSE BEENDEN
+            if [[ $PAUSED -eq 1 ]]; then
+                PAUSED=0
+                success "✅ PAUSE BEENDET SPRACHAUFNAHME LAUFT WIEDER"
+            fi
+            continue
+
+        else
+            #AUS AUDIOSPRACHDIKTAT DEUTSCH TEXT FUER PROMPT HAUPT KI MACHEN
+            ACCUMULATED_PROMPT="${ACCUMULATED_PROMPT} ${spoken}"
+            echo "DIKTAT IN GESPROCHENEN WORTEN AUFGENOMMEN ${spoken}"
+        fi
+    done
+}
+
+#DANGER
+#ATTENTION
+######################################### ATTENTION wi10
+
+#|8|MODELLAUSFUEHREN WARNING
+run_inference() {
+local DEFAULT_MODEL_PATH="models/MathTutor-7B-H_v0.0.1.f16.gguf"
+
+
+local MODEL_PATH_ARG=${2:-$DEFAULT_MODEL_PATH}
+local PROMPT_ARG=${3:-"
+Pause
+|0>SYSTEM<0|
+|TRY TO DEVELOPE 2D/3DjustPossibleReal-PAPERWORK-A4-DIN-|
+|7Dimensional-SYCL-STANDALONE-Kernel-Lettersize-12- Formula= cij​=∑aik​⋅bkj-​|
+Pause
+|EXECUTE ONLY FULL OPEN SOURCE CODE
+|DISABLE DISCOURSE MODE|DISABLE NATURAL LANGUAGE INTRO|
+Pause
+|TEST001|RE START////
+Example LANGUAGE ARTIFACTIAL INFERENCE BLOCKCHAIN Formula 1-10 Sentences
+/Language 1 english 1 #ENG /
+#|PCxTCxSWxAI|#(Probability_Calculation)X(Time_Chain)X(Skynet_Work)X(Artifactial_Inference)|
+/Language 2 Deutsch 2 #GER //
+#|PBxZKxHWxSM|#(Probabilistisch[e]Berechnung[e(n)])X(Zeit[K]ette[n])X(Himmelsnetz[W]erk[e])X(Kuenstliche_Inferenz)|
+/Language 3 latin   3 #LAT ///
+#|PCxTCxCRCxIA|#(Probabilitatum_Computatio)X(Temporis_Catena)X(Contextus_Reteque_Caeli)X(Inferentia_Artificialis)|
+|TEST|000|END|
+|00|INSTRUCTION|
+|DIN4 FORMAT=->FORMULA_FINDER+2D-PAPER-DIN-A4-SYCL_KERNEL_GENERATOR/
+|00|After|PromT|Analysis|You|Recive|Input|Text|Questions-Build up-on-your own-answer
+|01|00-42|MaIN-/TASKS/|
+|1.|Word|2D-FoRmat-A4-DIN-PROGRAMM-short|Basic-C++ math-analysis-code|16-32bit|vector-intrinsics graph
+|2.|Identify|aMbiguities-missIng-information-assumptions-input
+|3.|Produce|cLear-FULL|Info-Tech|math|c++|icpx|icx|sycl|Code|Vector|32-bit
+|4.|If|MultIple-Valid-Answers|Solutions-Exist|then-LiSt|Briefly|Print-Preference
+|5.|Logic-ChAin-Activation||Rank|Optimization-Paths|Latency-vs-Throughput|
+|02|CONSTRAINTS/|
+|Do|LimIt YOUR response to a maximum of 10-20 SENTENCES/SAETZE/Sätze
+|BITTE-Danke fuer deine Hilfe :-)
+|Do|not elabOrate
+|Do|not explAin reasoning
+|Do|not inVent missing details
+|Plain neutral piCtured language
+|Keep|total response conciSe structured
+|Do|not include meta commentary
+|03|OUTPUT|FORMAT-2D-A4-PAPER/|
+|MODE=EXECUTE|OUTPUT=SECTIONS|NO PARAPHRASE|NO EXAMPLE|/
+|Section1|Restatement
+|Section2|Ambiguities|Missing|Information
+|Section3|Minimal|ANswer|Exception:EXCEPTION LIMIT=1-3 SENTENCES|
+|Section4|Possible|Alternative
+#1.|Word|Short|PROOF-OF-ANSWER/LIMIT=1-10_SENTENCES
+#2.|IdEnTiFy|cij​ = ∑k=1n​aik​⋅bkj​; SYCL 16x16 Matrix Multiplication Kernel; FP16 32-bit precision.
+#3.|KEY WORDS:|XMX SYCL_COMPILER_HINT|icpx -fsycl -O3 Float@TARGET=SYCL|VECTOR|32BIT|16X16|
+#4.|If>Multiple>Valid>Solutions>MAX_THREE_Exist>>Then>List>Print>>>Preference
+#5.|List|briefly|print|Precision-FP16@32-bit|Aligment-Zero-Copy-Focus
+|04|Beginn|Processing/|
+|Add|Section1:Restatement
+|And|Section2:Ambiguities-Missing-Info
+|And|Section3:Minimal PROOF of Answer
+|And|Section4:Possible-AlternatiVe
+|Sol|SUPPRESS_META_COMMENTARY
+|Set|ATTRIBUTE_MINIMAL_CONCISE
+|CONTROL IGNORING_EVERYTHING_ELSE
+|And|
+|EXECUTE|PRINT 2D-Standart Din A4 DIN-PaperBLOCK SIMPLE CLEAR STRUKTURED
+|Style-_-ALL SECTIONS OUTPUT SINGLE SENTENCE MAX TEN SENTENCES
+|TERMINATE
+|Fi\|
+|MAIN|0-5|ENDE\
+"
+}
+
+local GPU_ID=$(echo "$ONEAPI_DEVICE_SELECTOR" | awk -F':' '{print $2}')
+local NGL_SET=${N_GPU_LAYERS:-99}
+local FULL_LLAMA_CLI_PATH="./${BUILD_DIR}/${LLAMA_CLI_PATH}"
+
+local CONTEXT_SIZE=131072
+
+#|4096,0x1000|8192,0x2000|16384,0x4000|20480,0x5000|24576,0x6000|32768|0x8000?|
+#|40960,0x????|61440,0x?????||65536|81920|131072|163830|196598|262144||524288|
+
+local PREDICT_TOKENS=131072
+
+
+
+#ATTENTION
+# SPRACHEINGABE HIER ABHOLEN
+capture_audio_prompt
+local PROMPT_ARG="${FINAL_VOICE_PROMPT}"
+#wi11 ATTENTION
+#ATTENTION
+
+
+log "🔷STARTE KI ANTWORT MIT PARAMETER**${DEVICE}**NGL:${NGL_SET}**${FULL_LLAMA_CLI_PATH}**"
+if [ ! -x "${FULL_LLAMA_CLI_PATH}" ]; then
+error "❌FEHLER AKTUELLER UNTERBAU NEUBAU FEHLGESCHLAGEN${FULL_LLAMA_CLI_PATH}"
+return 1
+fi
+if [[ -z "${FINAL_VOICE_PROMPT:-}" ]]; then
+    error "❌ Kein Sprach-Prompt empfangen"
+    return 1
+fi
+#|DUAL iGPU PLUS dGPU HOCHEFFIZIENZMODUS
+#|TENSORSPLIT SPLITMODE ROW
+if [ "${DEVICE}" = "DUAL" ] && [ -n "${TENSOR_SPLIT:-}" ]; then
+log "🔷STARTE DUAL GPU INFERENZ AKTIVER TENSORSPLIT [${TENSOR_SPLIT}]"
+local SAFE_CTX="${CONTEXT_SIZE}"
+if [ "${CONTEXT_SIZE}" -gt 131072 ]; then
+warn "⚠️HOHE KONTEXTGROESSE UND ALLGEMEINE SYSTEMBELASTUNG NUR F16 GGUF SPEZIALMODELLE MOEGLICH WARNUNG CTX 131072 MINIMUM"
+        SAFE_CTX=131072
+fi
+log "🔷STARTE DUAL GPU GERAET INFERENZ ${DEVICE_0} ID:${GPU_ID_0} | ${DEVICE_1} ID:${GPU_ID_1}"
+success "✅START FUER DUAL GPU MODUS GELUNGEN
+✅ES ARBEITEN NUN ZWEI GRAFIKKARTEN AN EINER KI INFERENZ AUF UHREM SYSTEM"
+ZES_ENABLE_SYSMAN=1 "${FULL_LLAMA_CLI_PATH}" \
+    --no-conversation \
+    --n-cpu-moe 14 \
+    --mlock \
+    --cache-type-k f16 \
+    --cache-type-v f16 \
+    --model "${MODEL_PATH_ARG}" \
+    --prompt "${PROMPT_ARG}" \
+    --n-predict "${PREDICT_TOKENS}" \
+    --ctx-size "${SAFE_CTX}" \
+    --keep 131072 \
+    -ngl "${N_GPU_LAYERS}" \
+    --main-gpu "${MAIN_GPU_ID:-0}" \
+    --tensor-split "${TENSOR_SPLIT}" \
+    --split-mode row \
+    --color auto
+
+#|EINZELGERAET
+else
+local GPU_ID="${MAIN_GPU_ID:-1}"
+log "🔷EINZELGERAET INFERENZ MIT GERAET ${DEVICE} ID:${GPU_ID}"
+ZES_ENABLE_SYSMAN=1 "${FULL_LLAMA_CLI_PATH}" \
+    --no-conversation \
+    --n-cpu-moe 14 \
+    --cache-type-k f16 \
+    --cache-type-v f16 \
+    --model "${MODEL_PATH_ARG}" \
+    --prompt "${PROMPT_ARG}" \
+    --n-predict "${PREDICT_TOKENS}" \
+    --ctx-size "${CONTEXT_SIZE}" \
+    --keep 131072 \
+    -ngl "${NGL_SET}" \
+    --main-gpu "${GPU_ID}" \
+    --color auto
+fi
+echo "✅SPRACHMODELL INTERAKTIONS FUNKTION JETZT AKTIV"
+}
+
+#|DEFINITION HAUPTFUNKTION
+main() {
+local FP_MODE="${1:-1}"
+local RERUN_BUILD=1
+prepare_environment
+#|01
+local FULL_LLAMA_CLI_PATH="./${BUILD_DIR}/${LLAMA_CLI_PATH}"
+local FULL_WHISPER_CLI_PATH="./${BUILD_DIR}/${WHISPER_CLI_PATH}"
+#wi12
+local FULL_LS_PATH="./${BUILD_DIR}/${LS_SYCL_DEVICE_PATH}"
+if [[ -f "${FULL_LLAMA_CLI_PATH}" ]] && [[ -f "${FULL_LS_PATH}" ]] && [[ -f "${FULL_WHISPER_CLI_PATH}" ]]; then
+success "✅ XAIGPUARC WERKZEUGK09ASTEN VORHANDEN NEUBAU UNNOETIG**${FULL_LLAMA_CLI_PATH}** **${FULL_LS_PATH}**"
+log "🔷UEBERSPRINGE BAUVORGANG WERKZEUGKASTEN"
+RERUN_BUILD=0
+else
+warn "⚠️KEIN AKTUELLES XAIGPUARC GEFUNDEN WIRD NEU GEBAUT"
+RERUN_BUILD=1
+fi
+if [[ "$RERUN_BUILD" -eq 1 ]]; then
+log "🔷STARTE ERSTMALIGEN BAUVORGANG XAIGPUARC"
+if check_internet; then
+log "🔷LADE WERKZEUGKASTEN"
+#|0
+setup_project
+#|1
+patch_llama_cpp
+#|2
+else
+warn "⚠️INTERNET NICHT VERFUEGBAR UEBERSPRINGE AUFWERTUNG WERKZEUGKASTEN LOKALE VERSION"
+fi
+fi
+configure_build "${FP_MODE}"
+#|3
+compile_project
+#|4
+auto_select_device
+#|5
+list_sycl_devices
+#|6
+prepare_model "${2:-}"
+#|7
+run_inference "${1:-1}" "${MODEL_PATH}" ""
+#wi13 # ATTENTION
+#DANGER
+#ATTENTION
+# ---------- 4. Hauptprogramm (optional: LLM-Anbindung) ----------
+main() {
+    initialize_audio_hardware
+
+    # Endlosschleife: immer wieder einen Prompt sammeln und verarbeiten
+    while true; do
+        # Wichtig: globale Variablen vor jedem Durchlauf zurücksetzen
+        ACCUMULATED_PROMPT=""
+        FINAL_VOICE_PROMPT=""
+        PAUSED=0
+        LISTENING=1
+
+        # Starte die Listener-Schleife – sie bricht ab, wenn ENTER gesagt wurde
+        start_audio_stream_listener
+
+        # Nach ENTER: hier steht der fertige Prompt in $FINAL_VOICE_PROMPT
+        if [[ -n "$FINAL_VOICE_PROMPT" ]]; then
+            log "📤 Übergebe Prompt an das Sprachmodell:"
+            echo ">>> $FINAL_VOICE_PROMPT"
+
+            # ==================================================
+            # HIER KANNST DU DEIN LLM EINBINDEN (
+
+            success "✅ Prompt verarbeitet – bereit für nächste Eingabe."
+        else
+            # Falls die Schleife ohne ENTER beendet wurde (z. B. durch STOP)
+            break
+        fi
+    done
+}
+
+# Skript starten
+main
+
+#DANGER
+#ATTENTION
+#DANGER
+#ATTENTION
+#|8
+log "✅NUTZUNG VON XAIGPUARC JETZT MOEGLICH /IHRE FRAGE NACH > ... DRUECKEN SIE |ENTER**${BUILD_DIR}/${LLAMA_CLI_PATH}**"
+}
+#|HAUPTSCHLEIFE
+main "${1:-1}" "${2:-}" "${3:-}"
+log "✅KOMPLETTER BAUVORGANG HIER GESPEICHERT**${LOG_FILE}**"
